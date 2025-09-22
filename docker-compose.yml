@@ -61,6 +61,7 @@ services:
       - ./data:/app/data
       - ./config:/root/.config/PDFMathTranslate
       - ./fonts:/app/fonts
+      - ./.env:/app/.env  # Mount .env file for secure API key loading
 
     stdin_open: true
     tty: true

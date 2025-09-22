@@ -7,11 +7,16 @@ import copy
 # Load .env file if available
 try:
     from dotenv import load_dotenv
-    # Try to load .env from current directory and project root
+    # Try to load .env from multiple locations for robustness
     load_dotenv()  # Load from current working directory
-    # Also try to load from the PDFMathTranslate project root
+
+    # Also try project root (for development)
     project_root = Path(__file__).parent.parent
     load_dotenv(project_root / ".env")
+
+    # Also try /app/.env (for Docker environment)
+    load_dotenv("/app/.env")
+
 except ImportError:
     # python-dotenv not installed, skip .env loading
     pass
