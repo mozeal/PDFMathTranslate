@@ -291,14 +291,20 @@ def translate_file(
 
     _envs = {}
     for i, env in enumerate(translator.envs.items()):
-        _envs[env[0]] = envs[i]
-    for k, v in _envs.items():
-        if str(k).upper().endswith("API_KEY") and str(v) == "***":
-            # Load Real API_KEYs from local configure file
+        key_name = env[0]
+        frontend_value = envs[i]
+
+        # SECURITY: Never use API keys from frontend input
+        # Always load from environment variables (.env file) for security
+        if str(key_name).upper().endswith("API_KEY"):
+            # Ignore frontend input for API keys - use only environment variables
             real_keys: str = ConfigManager.get_env_by_translatername(
-                translator, k, None
+                translator, key_name, None
             )
-            _envs[k] = real_keys
+            _envs[key_name] = real_keys
+        else:
+            # Non-API key settings can still come from frontend
+            _envs[key_name] = frontend_value
 
     print(f"Files before translation: {os.listdir(output)}")
 
@@ -562,6 +568,7 @@ with gr.Blocks(
                 choices=enabled_services,
                 value=enabled_services[0],
             )
+            gr.Markdown("⚠️ **API Key Configuration**: For security, API keys are loaded from `.env` file only. Please add your API keys to the `.env` file in the project root directory (e.g., `OPENAI_API_KEY=your-key-here`). API keys cannot be entered through this interface.")
             envs = []
             for i in range(3):
                 envs.append(
@@ -635,9 +642,9 @@ with gr.Blocks(
                             and hidden_gradio_details
                         ):
                             visible = False
-                        # Hidden Keys From Gradio
+                        # Hide API keys completely - they should be in .env file
                         if "API_KEY" in label.upper():
-                            value = "***"  # We use "***" Present Real API_KEY
+                            visible = False  # Don't show API key fields at all
                     _envs[i] = gr.update(
                         visible=visible,
                         label=label,
