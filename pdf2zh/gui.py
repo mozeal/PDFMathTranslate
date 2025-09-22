@@ -575,6 +575,7 @@ with gr.Blocks(
                     gr.Textbox(
                         visible=False,
                         interactive=True,
+                        type="password",  # Make all env fields password type for security
                     )
                 )
             with gr.Row():
@@ -635,16 +636,17 @@ with gr.Blocks(
                         translator, env[0], env[1]
                     )
                     visible = True
-                    if hidden_gradio_details:
+
+                    # SECURITY: Always hide API keys regardless of other settings
+                    if "API_KEY" in label.upper():
+                        visible = False  # API keys must never be visible in UI
+                    elif hidden_gradio_details:
                         if (
                             "MODEL" not in str(label).upper()
                             and value
                             and hidden_gradio_details
                         ):
                             visible = False
-                        # Hide API keys completely - they should be in .env file
-                        if "API_KEY" in label.upper():
-                            visible = False  # Don't show API key fields at all
                     _envs[i] = gr.update(
                         visible=visible,
                         label=label,
