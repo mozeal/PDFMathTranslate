@@ -575,7 +575,7 @@ with gr.Blocks(
                     gr.Textbox(
                         visible=False,
                         interactive=True,
-                        type="password",  # Make all env fields password type for security
+                        # Type will be set dynamically in on_select_service
                     )
                 )
             with gr.Row():
@@ -638,8 +638,10 @@ with gr.Blocks(
                     visible = True
 
                     # SECURITY: Always hide API keys regardless of other settings
-                    if "API_KEY" in label.upper():
+                    field_type = "text"  # Default type for most fields
+                    if "API_KEY" in label.upper() or "AUTH_KEY" in label.upper():
                         visible = False  # API keys must never be visible in UI
+                        field_type = "password"  # API keys should be password type for security
                     elif hidden_gradio_details:
                         if (
                             "MODEL" not in str(label).upper()
@@ -647,10 +649,12 @@ with gr.Blocks(
                             and hidden_gradio_details
                         ):
                             visible = False
+
                     _envs[i] = gr.update(
                         visible=visible,
                         label=label,
                         value=value,
+                        type=field_type,  # Set appropriate field type
                     )
                 _envs[-1] = gr.update(visible=translator.CustomPrompt)
                 return _envs
