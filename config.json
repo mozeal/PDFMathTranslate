@@ -1,4 +1,5 @@
 {
+  "_security_note": "⚠️ For better security, store API keys in .env file instead of this config.json file. The .env file should not be committed to git.",
   "translators": {
     "openai": {
       "OPENAI_API_KEY": "your-openai-api-key-here",

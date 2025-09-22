@@ -4,6 +4,18 @@ from threading import RLock  # 改成 RLock
 import os
 import copy
 
+# Load .env file if available
+try:
+    from dotenv import load_dotenv
+    # Try to load .env from current directory and project root
+    load_dotenv()  # Load from current working directory
+    # Also try to load from the PDFMathTranslate project root
+    project_root = Path(__file__).parent.parent
+    load_dotenv(project_root / ".env")
+except ImportError:
+    # python-dotenv not installed, skip .env loading
+    pass
+
 
 class ConfigManager:
     _instance = None
@@ -25,7 +37,9 @@ class ConfigManager:
             return
         self._initialized = True
 
-        self._config_path = Path.home() / ".config" / "PDFMathTranslate" / "config.json"
+        # Allow override of config path via environment variable
+        config_dir = os.environ.get('CONFIG_PATH', str(Path.home() / ".config" / "PDFMathTranslate"))
+        self._config_path = Path(config_dir) / "config.json"
         self._config_data = {}
 
         # 这里不要再加锁，因为外层可能已经加了锁 (get_instance), RLock也无妨

@@ -38,6 +38,7 @@ dependencies = [
     "babeldoc>=0.1.22, <0.3.0",
     "rich",
     "pythainlp",
+    "python-dotenv",
 ]
 
 [project.optional-dependencies]

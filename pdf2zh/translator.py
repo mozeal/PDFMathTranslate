@@ -65,15 +65,38 @@ class BaseTranslator:
         # Cannot use self.envs = copy(self.__class__.envs)
         # because if set_envs called twice, the second call will override the first call
         self.envs = copy(self.envs)
-        if ConfigManager.get_translator_by_name(self.name):
-            self.envs = ConfigManager.get_translator_by_name(self.name)
+
+        # SECURITY: Priority order for API key loading
+        # 1. Environment variables (.env files loaded by config.py) - SECURE
+        # 2. config.json values - INSECURE fallback only
+        # 3. Passed parameters - highest priority override
+
         needUpdate = False
+
+        # First: Load environment variables (includes .env files)
         for key in self.envs:
             if key in os.environ:
                 self.envs[key] = os.environ[key]
                 needUpdate = True
+
+        # Second: Load from config.json only if not set by environment
+        config_envs = ConfigManager.get_translator_by_name(self.name)
+        if config_envs:
+            import logging
+            log = logging.getLogger(__name__)
+            for key, value in config_envs.items():
+                # Only use config.json value if no environment variable is set
+                if key in self.envs and self.envs[key] is None:
+                    self.envs[key] = value
+                    needUpdate = True
+                    # Warn about insecure API key storage
+                    if key.endswith('_API_KEY') and value:
+                        log.warning(f"⚠️ API key for {key} loaded from config.json - consider moving to .env file for security")
+
         if needUpdate:
             ConfigManager.set_translator_by_name(self.name, self.envs)
+
+        # Third: Override with passed parameters (highest priority)
         if envs is not None:
             for key in envs:
                 self.envs[key] = envs[key]
