@@ -681,7 +681,7 @@ class GeminiTranslator(OpenAITranslator):
     # https://ai.google.dev/gemini-api/docs/openai
     name = "gemini"
     envs = {
-        "GEMINI_API_KEY": None,
+        "GOOGLE_API_KEY": None,  # Use same API key as Google Translate
         "GEMINI_MODEL": "gemini-1.5-flash",
     }
     CustomPrompt = True
@@ -691,7 +691,7 @@ class GeminiTranslator(OpenAITranslator):
     ):
         self.set_envs(envs)
         base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
-        api_key = self.envs["GEMINI_API_KEY"]
+        api_key = self.envs["GOOGLE_API_KEY"]  # Use GOOGLE_API_KEY from .env
         if not model:
             model = self.envs["GEMINI_MODEL"]
         super().__init__(

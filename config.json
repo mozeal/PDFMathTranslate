@@ -14,7 +14,8 @@
       "AZURE_REGION": "your-azure-region"
     },
     "gemini": {
-      "GEMINI_API_KEY": "your-gemini-api-key-here"
+      "GOOGLE_API_KEY": "your-google-api-key-here",
+      "GEMINI_MODEL": "gemini-1.5-flash"
     }
   },
   "cache_enabled": true,
