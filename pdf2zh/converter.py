@@ -222,12 +222,12 @@ class TranslateConverter(PDFConverterEx):
 
                 # Log detailed glyph information for Thai text
                 if any(0x0E00 <= ord(ch) <= 0x0E7F for ch in text):  # Contains Thai characters
-                    log.info(f"🔤 Thai glyph details:")
+                    log.info("🔤 Thai glyph details:")
                     for i, glyph in enumerate(glyphs[:6]):  # Show first 6 glyphs
                         log.info(f"   [{i}] ID:{glyph['glyph_id']}, cluster:{glyph['cluster']}, "
-                                f"advance:{glyph['x_advance']:.1f}, offset:({glyph['x_offset']:.1f},{glyph['y_offset']:.1f})")
+                                 f"advance:{glyph['x_advance']:.1f}, offset:({glyph['x_offset']:.1f},{glyph['y_offset']:.1f})")
                     if len(glyphs) > 6:
-                        log.info(f"   ... and {len(glyphs)-6} more glyphs")
+                        log.info(f"   ... and {len(glyphs) - 6} more glyphs")
 
                 return glyphs
             else:
@@ -271,6 +271,170 @@ class TranslateConverter(PDFConverterEx):
         else:
             log.debug(f"📏 Fallback processing for '{text}': {len(glyphs)} glyphs (needs_shaping: {needs_shaping})")
         return glyphs
+
+    def _get_thai_word_boundaries(self, text: str) -> List[int]:
+        """
+        Get word boundary positions for Thai text using pythainlp.
+
+        Args:
+            text: Thai text to analyze
+
+        Returns:
+            List of character positions where word boundaries occur
+        """
+        try:
+            import pythainlp
+            # Use configurable engine for word segmentation
+            engine = ConfigManager.get("THAI_TOKENIZER_ENGINE", "newmm")
+            words = pythainlp.word_tokenize(text, engine=engine)
+            boundaries = []
+            pos = 0
+            for word in words:
+                pos += len(word)
+                boundaries.append(pos)
+
+            log.info(f"🇹🇭 Thai word boundaries for '{text}': {words} -> positions {boundaries}")
+            return boundaries
+        except ImportError:
+            log.warning("pythainlp not available, falling back to character-level wrapping")
+            return []
+        except Exception as e:
+            log.warning(f"Error in Thai word segmentation: {e}")
+            return []
+
+    def _find_safe_break_point(self, text: str, current_pos: int, target_lang: str, char_widths: List[float]) -> int:
+        """
+        Find a safe break point for text wrapping that respects word boundaries.
+
+        Args:
+            text: Full text to analyze
+            current_pos: Current character position where break is needed
+            target_lang: Target language code (e.g., 'th' for Thai)
+            char_widths: List of character widths up to current_pos
+
+        Returns:
+            Safe break position (character index)
+        """
+        # Check if Thai word wrapping is enabled
+        thai_word_wrap_enabled = ConfigManager.get("THAI_WORD_WRAP_ENABLED", "true").lower() == "true"
+
+        # For Thai text, use word boundaries if enabled
+        if target_lang == 'th' and current_pos > 0 and thai_word_wrap_enabled:
+            boundaries = self._get_thai_word_boundaries(text[:current_pos])
+            if boundaries:
+                # Find the last word boundary before or at current position
+                safe_pos = max(b for b in boundaries if b <= current_pos)
+
+                # Make sure we don't break too early (configurable minimum line usage)
+                min_line_usage = float(ConfigManager.get("THAI_MIN_LINE_USAGE", "0.3"))
+                min_pos = max(1, int(current_pos * min_line_usage))
+                if safe_pos >= min_pos:
+                    log.info(f"🔤 Thai safe break: position {current_pos} -> {safe_pos}")
+                    return safe_pos
+                else:
+                    log.info(f"🔤 Thai safe break too early ({safe_pos} < {min_pos}), using current position")
+
+        # Fallback: try to find space or punctuation near current position
+        for offset in range(min(10, current_pos)):
+            check_pos = current_pos - offset
+            if check_pos > 0 and check_pos < len(text):
+                char = text[check_pos]
+                if char in ' \t\n.,;:!?':
+                    log.debug(f"📝 Found safe break at punctuation/space: position {current_pos} -> {check_pos}")
+                    return check_pos
+
+        # Last resort: break at current position
+        return current_pos
+
+    def _calculate_text_width(self, text: str, font_name: str, font_size: float) -> float:
+        """
+        Calculate the total width of a text string.
+
+        Args:
+            text: Text to measure
+            font_name: Font identifier
+            font_size: Font size
+
+        Returns:
+            Total text width
+        """
+        total_width = 0.0
+        for char in text:
+            if font_name == self.noto_name and self.noto:
+                width = self.noto.char_lengths(char, font_size)[0]
+            elif hasattr(self, 'fontmap') and font_name in self.fontmap:
+                width = self.fontmap[font_name].char_width(ord(char)) * font_size
+            else:
+                width = font_size * 0.6  # Rough estimate
+            total_width += width
+        return total_width
+
+    def _add_thai_word_boundary_hints(self, text: str) -> str:
+        """
+        Add word boundary hints to Thai text for better line wrapping.
+
+        Args:
+            text: Thai text to process
+
+        Returns:
+            Text with word boundary hints (zero-width spaces) inserted
+        """
+        # Check if Thai word wrapping is enabled
+        thai_word_wrap_enabled = ConfigManager.get("THAI_WORD_WRAP_ENABLED", "true").lower() == "true"
+        if not thai_word_wrap_enabled:
+            return text
+
+        try:
+            import pythainlp
+
+            # Preserve formula markers
+            formula_parts = []
+            working_text = text
+
+            # Extract and temporarily replace formula markers
+            formula_pattern = re.compile(r'\{v\d+\}')
+            for i, match in enumerate(formula_pattern.finditer(text)):
+                placeholder = f"__FORMULA_{i}__"
+                formula_parts.append((placeholder, match.group(0)))
+                working_text = working_text.replace(match.group(0), placeholder, 1)
+
+            # Process Thai text segments
+            segments = re.split(r'(__FORMULA_\d+__)', working_text)
+            processed_segments = []
+
+            for segment in segments:
+                if segment.startswith('__FORMULA_') and segment.endswith('__'):
+                    # Keep formula markers as-is
+                    processed_segments.append(segment)
+                elif segment and any(0x0E00 <= ord(ch) <= 0x0E7F for ch in segment):  # Contains Thai
+                    # Tokenize and add zero-width spaces at word boundaries
+                    engine = ConfigManager.get("THAI_TOKENIZER_ENGINE", "newmm")
+                    words = pythainlp.word_tokenize(segment, engine=engine)
+
+                    # Join with zero-width space (U+200B) for soft breaks
+                    processed_segment = '\u200B'.join(words)
+                    processed_segments.append(processed_segment)
+
+                    log.info(f"🇹🇭 Added word boundary hints: '{segment}' -> {len(words)} words")
+                else:
+                    # Non-Thai text, keep as-is
+                    processed_segments.append(segment)
+
+            # Rejoin segments
+            result = ''.join(processed_segments)
+
+            # Restore formula markers
+            for placeholder, formula in formula_parts:
+                result = result.replace(placeholder, formula)
+
+            return result
+
+        except ImportError:
+            log.debug("pythainlp not available for Thai word boundary hints")
+            return text
+        except Exception as e:
+            log.warning(f"Error adding Thai word boundary hints: {e}")
+            return text
 
     def receive_layout(self, ltpage: LTPage):
         # 段落
@@ -466,15 +630,28 @@ class TranslateConverter(PDFConverterEx):
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=self.thread
         ) as executor:
-            news = list(executor.map(worker, sstk))
+            raw_news = list(executor.map(worker, sstk))
+
+        # Post-process Thai text to add word boundary hints
+        news = []
+        target_lang = self.translator.lang_out.lower()
+        for text in raw_news:
+            if target_lang == 'th' and text and not re.match(r"^\{v\d+\}$", text):
+                processed_text = self._add_thai_word_boundary_hints(text)
+                news.append(processed_text)
+            else:
+                news.append(text)
 
         ############################################################
         # C. 新文档排版
         def raw_string(fcur: str, cstk: str):  # 编码字符串
+            # Remove zero-width spaces before encoding - they're only for break hints
+            cstk = cstk.replace('\u200B', '')
+
             if fcur == self.noto_name:
                 # Apply HarfBuzz shaping for Thai text to get proper glyph IDs
-                if (self.text_shaper.enabled and
-                    cstk and any(0x0E00 <= ord(ch) <= 0x0E7F for ch in cstk)):
+                if (self.text_shaper.enabled
+                        and cstk and any(0x0E00 <= ord(ch) <= 0x0E7F for ch in cstk)):
 
                     try:
                         log.info(f"🇹🇭 GLYPH SHAPING: '{cstk}' with HarfBuzz")
@@ -494,7 +671,7 @@ class TranslateConverter(PDFConverterEx):
                                 log.info(f"✅ HarfBuzz glyphs: {len(glyph_codes)} glyphs")
                                 return "".join(glyph_codes)
                             else:
-                                log.debug(f"❌ HarfBuzz shaping failed, using fallback")
+                                log.debug("❌ HarfBuzz shaping failed, using fallback")
 
                     except Exception as e:
                         log.warning(f"⚠️ Error in glyph shaping: {e}")
@@ -596,6 +773,9 @@ class TranslateConverter(PDFConverterEx):
                     r"\{\s*v([\d\s]+)\}", new[ptr:], re.IGNORECASE
                 )  # 匹配 {vn} 公式标记
                 mod = 0  # 文字修饰符
+
+                # Calculate scaled font size for line width calculations (needed for both text and formula processing)
+                scaled_size_for_width = size * font_size_scale
                 if vy_regex:  # 加载公式
                     ptr += len(vy_regex.group(0))
                     try:
@@ -615,9 +795,6 @@ class TranslateConverter(PDFConverterEx):
                         pass
                     if fcur_ is None:
                         fcur_ = self.noto_name  # 默认非拉丁字体
-
-                    # Calculate advancement using scaled font size for proper line width calculation
-                    scaled_size_for_width = size * font_size_scale
 
                     # Try complex text processing for Thai and other complex scripts (temporarily disabled - causes layout issues)
                     if False and fcur_ == self.noto_name and self.text_shaper.enabled and ptr < len(new):
@@ -743,10 +920,62 @@ class TranslateConverter(PDFConverterEx):
                         log.debug(f"📐 DEBUG: Char '{ch}' width scaled from {original_adv:.2f} to {adv:.2f}")
 
                     ptr += 1
+                # Check for Thai text wrapping with word boundaries
+                should_wrap = False
+                thai_safe_break = False
+
+                if adv > 0 and x + adv > x1 + 0.1 * scaled_size_for_width:  # Approaching right boundary
+                    should_wrap = True
+                    target_lang = self.translator.lang_out.lower()
+
+                    log.info(f"🔍 Line wrap needed: target_lang='{target_lang}', cstk='{cstk}', ch='{ch}', x={x:.1f}, x1={x1:.1f}")
+
+                    # For Thai text, look for zero-width space break points
+                    if target_lang == 'th' and cstk:
+                        # Find the last zero-width space in the current text buffer
+                        zwsp_pos = cstk.rfind('\u200B')
+                        if zwsp_pos >= 0:
+                            # Split at the zero-width space
+                            safe_text = cstk[:zwsp_pos]
+                            remaining_text = cstk[zwsp_pos + 1:]  # Skip the zero-width space
+
+                            log.info(f"🇹🇭 Thai word wrap at ZWSP: '{cstk}' split at {zwsp_pos} -> '{safe_text}' | '{remaining_text}'")
+
+                            # Output the safe portion
+                            if safe_text:
+                                ops_vals.append({
+                                    "type": OpType.TEXT,
+                                    "font": fcur,
+                                    "size": size,
+                                    "x": tx,
+                                    "dy": 0,
+                                    "rtxt": raw_string(fcur, safe_text),
+                                    "lidx": lidx
+                                })
+
+                            # Start new line with remaining text
+                            x = x0
+                            lidx += 1
+                            tx = x
+
+                            # Calculate width of remaining text for positioning
+                            if remaining_text:
+                                remaining_width = self._calculate_text_width(remaining_text, fcur, scaled_size_for_width)
+                                x += remaining_width
+
+                            # Set up for next iteration - add current character to remaining text
+                            cstk = remaining_text + ch
+                            thai_safe_break = True
+                            should_wrap = False  # We handled the wrap
+
+                            # Continue processing the current character
+                            ptr += 1
+                            continue
+
                 if (                                # 输出文字缓冲区
                     fcur_ != fcur                   # 1. 字体更新
                     or vy_regex                     # 2. 插入公式
-                    or (adv > 0 and x + adv > x1 + 0.1 * scaled_size_for_width)    # 3. 到达右边界（可能一整行都被符号化，这里需要考虑浮点误差）
+                    or (should_wrap and not thai_safe_break)  # 3. 到达右边界（已处理泰语换行的情况除外）
                 ):
                     if cstk:
                         ops_vals.append({
@@ -759,7 +988,7 @@ class TranslateConverter(PDFConverterEx):
                             "lidx": lidx
                         })
                         cstk = ""
-                if brk and x + adv > x1 + 0.1 * size:  # 到达右边界且原文段落存在换行
+                if brk and x + adv > x1 + 0.1 * size and not thai_safe_break:  # 到达右边界且原文段落存在换行（如果已经处理了泰语换行则跳过）
                     x = x0
                     lidx += 1
                 if vy_regex:  # 插入公式
@@ -792,14 +1021,21 @@ class TranslateConverter(PDFConverterEx):
                                 "lidx": lidx
                             })
                 else:  # 插入文字缓冲区
-                    if not cstk:  # 单行开头
-                        tx = x
-                        if x == x0 and ch == " ":  # 消除段落换行空格
-                            adv = 0
+                    if not thai_safe_break:  # 如果没有进行泰语安全换行，则正常添加字符
+                        if not cstk:  # 单行开头
+                            tx = x
+                            if x == x0 and ch == " ":  # 消除段落换行空格
+                                adv = 0
+                            elif ch == '\u200B':  # 零宽空格不应该被渲染，但保留在文本中
+                                adv = 0
+                                cstk += ch
+                            else:
+                                cstk += ch
                         else:
+                            if ch == '\u200B':  # 零宽空格不占用宽度
+                                adv = 0
                             cstk += ch
-                    else:
-                        cstk += ch
+                    # 如果进行了泰语安全换行，cstk已经包含了remaining_text，不需要再添加字符
                 adv -= mod # 文字修饰符
                 fcur = fcur_
                 x += adv

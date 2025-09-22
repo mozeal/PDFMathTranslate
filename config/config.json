@@ -19,5 +19,8 @@
     "LANG_LINEHEIGHT_EN": "1.1",
     "LANG_FONTSIZE_SCALE_ZH": "1.0",
     "LANG_LINEHEIGHT_ZH": "1.4",
-    "TEXT_SHAPING_ENABLED": "true"
+    "TEXT_SHAPING_ENABLED": "true",
+    "THAI_WORD_WRAP_ENABLED": "true",
+    "THAI_TOKENIZER_ENGINE": "newmm",
+    "THAI_MIN_LINE_USAGE": "0.3"
 }
