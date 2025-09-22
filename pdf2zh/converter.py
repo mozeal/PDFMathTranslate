@@ -222,7 +222,6 @@ class TranslateConverter(PDFConverterEx):
 
                 # Log detailed glyph information for Thai text
                 if any(0x0E00 <= ord(ch) <= 0x0E7F for ch in text):  # Contains Thai characters
-                    log.info("🔤 Thai glyph details:")
                     for i, glyph in enumerate(glyphs[:6]):  # Show first 6 glyphs
                         log.info(f"   [{i}] ID:{glyph['glyph_id']}, cluster:{glyph['cluster']}, "
                                  f"advance:{glyph['x_advance']:.1f}, offset:({glyph['x_offset']:.1f},{glyph['y_offset']:.1f})")
@@ -247,7 +246,12 @@ class TranslateConverter(PDFConverterEx):
         # Fallback: create simple glyph list for character-by-character processing
         glyphs = []
         for i, ch in enumerate(text):
-            if font_name == self.noto_name and self.noto:
+            if ch == '\u200B':  # Zero-width space has no advance
+                advance = 0.0
+            elif unicodedata.category(ch) == 'Mn':  # Thai combining marks (tone marks, vowels)
+                advance = 0.0  # Combining marks should not advance the cursor
+                log.debug(f"🇹🇭 _shape_text_run fallback: Thai combining mark '{ch}' advance set to 0.0pt")
+            elif font_name == self.noto_name and self.noto:
                 advance = self.noto.char_lengths(ch, scaled_font_size)[0]
             elif hasattr(self, 'fontmap') and font_name in self.fontmap:
                 advance = self.fontmap[font_name].char_width(ord(ch)) * scaled_font_size
@@ -293,7 +297,6 @@ class TranslateConverter(PDFConverterEx):
                 pos += len(word)
                 boundaries.append(pos)
 
-            log.info(f"🇹🇭 Thai word boundaries for '{text}': {words} -> positions {boundaries}")
             return boundaries
         except ImportError:
             log.warning("pythainlp not available, falling back to character-level wrapping")
@@ -329,10 +332,7 @@ class TranslateConverter(PDFConverterEx):
                 min_line_usage = float(ConfigManager.get("THAI_MIN_LINE_USAGE", "0.3"))
                 min_pos = max(1, int(current_pos * min_line_usage))
                 if safe_pos >= min_pos:
-                    log.info(f"🔤 Thai safe break: position {current_pos} -> {safe_pos}")
                     return safe_pos
-                else:
-                    log.info(f"🔤 Thai safe break too early ({safe_pos} < {min_pos}), using current position")
 
         # Fallback: try to find space or punctuation near current position
         for offset in range(min(10, current_pos)):
@@ -360,7 +360,12 @@ class TranslateConverter(PDFConverterEx):
         """
         total_width = 0.0
         for char in text:
-            if font_name == self.noto_name and self.noto:
+            if char == '\u200B':  # Zero-width space has no width
+                width = 0.0
+            elif unicodedata.category(char) == 'Mn':  # Thai combining marks have no advance
+                width = 0.0
+                log.debug(f"🇹🇭 _calculate_text_width: Thai combining mark '{char}' set to 0.0pt")
+            elif font_name == self.noto_name and self.noto:
                 width = self.noto.char_lengths(char, font_size)[0]
             elif hasattr(self, 'fontmap') and font_name in self.fontmap:
                 width = self.fontmap[font_name].char_width(ord(char)) * font_size
@@ -833,6 +838,10 @@ class TranslateConverter(PDFConverterEx):
 
                             log.debug(f"🔤 Processing complex script sentence: '{text_run}' ({len(text_run)} chars) -> {len(glyphs)} glyphs")
 
+                            # Log raw glyph advance data for debugging
+                            total_raw_advance = sum(g['x_advance'] for g in glyphs)
+                            log.info(f"🔍 Raw HarfBuzz total advance: {total_raw_advance:.2f}pt")
+
                             # Generate text operations using cluster-based rendering
                             # Group glyphs by cluster to render complete character units
                             clusters = {}
@@ -863,6 +872,9 @@ class TranslateConverter(PDFConverterEx):
                                     char_category = unicodedata.category(char)
                                     if char_category not in ['Mn', 'Mc', 'Me']:  # Not a combining mark
                                         clusters[cluster]['base_advance'] += glyph['x_advance']
+                                        log.debug(f"🔤 Adding advance: '{char}' ({char_category}) +{glyph['x_advance']:.2f}pt")
+                                    else:
+                                        log.debug(f"🔤 Skipping combining mark advance: '{char}' ({char_category}) {glyph['x_advance']:.2f}pt")
 
                                     # Use positioning from the first glyph in cluster for offset
                                     if len(clusters[cluster]['char_indices']) == 1:
@@ -880,7 +892,7 @@ class TranslateConverter(PDFConverterEx):
                                     cluster_y = cluster_data['y_offset']
 
                                     # Create single text operation for the complete character cluster
-                                    ops_vals.append({
+                                    text_op = {
                                         "type": OpType.TEXT,
                                         "font": fcur_,
                                         "size": size,
@@ -888,8 +900,10 @@ class TranslateConverter(PDFConverterEx):
                                         "dy": cluster_y,
                                         "rtxt": raw_string(fcur_, cluster_data['chars']),
                                         "lidx": lidx
-                                    })
+                                    }
+                                    ops_vals.append(text_op)
 
+                
                                     log.debug(f"🔤 Cluster {cluster_id}: '{cluster_data['chars']}' at x={cluster_x:.2f}, y_offset={cluster_y:.2f}, advance={cluster_data['base_advance']:.2f}")
 
                                     # Advance to next cluster position
@@ -897,6 +911,7 @@ class TranslateConverter(PDFConverterEx):
                                     total_advance += cluster_data['base_advance']
 
                             # Update main x position and pointer
+                            log.info(f"🇹🇭 HarfBuzz total advance: {total_advance:.2f}pt for '{text_run}'")
                             x = current_x
                             ptr = lookahead_ptr  # Skip past the processed run
                             adv = 0  # No additional advancement needed
@@ -909,73 +924,51 @@ class TranslateConverter(PDFConverterEx):
                     # Standard character processing (fallback or non-complex scripts)
                     if fcur_ == self.noto_name:
                         adv = self.noto.char_lengths(ch, scaled_size_for_width)[0]
+                        if 0x0E00 <= ord(ch) <= 0x0E7F:  # Thai characters
+                            log.info(f"🔢 Thai width: '{ch}' = {adv:.2f}pt")
                     else:
                         adv = self.fontmap[fcur_].char_width(ord(ch)) * scaled_size_for_width
+                        if 0x0E00 <= ord(ch) <= 0x0E7F:  # Thai characters
+                            log.info(f"🔢 Thai width: '{ch}' = {adv:.2f}pt")
+
+                    # Handle special characters that should have no advance width
+                    if ch == '\u200B':  # Zero-width space should have no advance
+                        adv = 0
+                    elif ch == '|':  # DEBUG: | used as visible ZWSP replacement
+                        adv = 0
+                    elif unicodedata.category(ch) == 'Mn':  # Thai combining marks (tone marks, vowels)
+                        original_adv = adv
+                        adv = 0  # Combining marks should not advance the cursor
+                        log.info(f"🇹🇭 Combining mark: '{ch}' {original_adv:.1f}pt -> {adv:.1f}pt")
 
                     if font_size_scale != 1.0:
                         if fcur_ == self.noto_name:
                             original_adv = self.noto.char_lengths(ch, size)[0]
                         else:
                             original_adv = self.fontmap[fcur_].char_width(ord(ch)) * size
-                        log.debug(f"📐 DEBUG: Char '{ch}' width scaled from {original_adv:.2f} to {adv:.2f}")
 
                     ptr += 1
-                # Check for Thai text wrapping with word boundaries
+                # Check for line wrapping
                 should_wrap = False
-                thai_safe_break = False
+                prefer_break_at_pipe = False
 
                 if adv > 0 and x + adv > x1 + 0.1 * scaled_size_for_width:  # Approaching right boundary
                     should_wrap = True
-                    target_lang = self.translator.lang_out.lower()
 
-                    log.info(f"🔍 Line wrap needed: target_lang='{target_lang}', cstk='{cstk}', ch='{ch}', x={x:.1f}, x1={x1:.1f}")
-
-                    # For Thai text, look for zero-width space break points
-                    if target_lang == 'th' and cstk:
-                        # Find the last zero-width space in the current text buffer
-                        zwsp_pos = cstk.rfind('\u200B')
-                        if zwsp_pos >= 0:
-                            # Split at the zero-width space
-                            safe_text = cstk[:zwsp_pos]
-                            remaining_text = cstk[zwsp_pos + 1:]  # Skip the zero-width space
-
-                            log.info(f"🇹🇭 Thai word wrap at ZWSP: '{cstk}' split at {zwsp_pos} -> '{safe_text}' | '{remaining_text}'")
-
-                            # Output the safe portion
-                            if safe_text:
-                                ops_vals.append({
-                                    "type": OpType.TEXT,
-                                    "font": fcur,
-                                    "size": size,
-                                    "x": tx,
-                                    "dy": 0,
-                                    "rtxt": raw_string(fcur, safe_text),
-                                    "lidx": lidx
-                                })
-
-                            # Start new line with remaining text
-                            x = x0
-                            lidx += 1
-                            tx = x
-
-                            # Calculate width of remaining text for positioning
-                            if remaining_text:
-                                remaining_width = self._calculate_text_width(remaining_text, fcur, scaled_size_for_width)
-                                x += remaining_width
-
-                            # Set up for next iteration - add current character to remaining text
-                            cstk = remaining_text + ch
-                            thai_safe_break = True
-                            should_wrap = False  # We handled the wrap
-
-                            # Continue processing the current character
-                            ptr += 1
-                            continue
+                    # Check if we can break at a better position (ZWSP for Thai word boundaries)
+                    if '\u200B' in cstk:
+                        last_zwsp = cstk.rfind('\u200B')
+                        if last_zwsp >= 0:  # Found a break point
+                            prefer_break_at_pipe = True
+                        else:
+                            pass
+                    else:
+                        pass
 
                 if (                                # 输出文字缓冲区
                     fcur_ != fcur                   # 1. 字体更新
                     or vy_regex                     # 2. 插入公式
-                    or (should_wrap and not thai_safe_break)  # 3. 到达右边界（已处理泰语换行的情况除外）
+                    or (should_wrap and not prefer_break_at_pipe)  # 3. 到达右边界但不是优选断点
                 ):
                     if cstk:
                         ops_vals.append({
@@ -988,7 +981,48 @@ class TranslateConverter(PDFConverterEx):
                             "lidx": lidx
                         })
                         cstk = ""
-                if brk and x + adv > x1 + 0.1 * size and not thai_safe_break:  # 到达右边界且原文段落存在换行（如果已经处理了泰语换行则跳过）
+
+                # Handle preferred ZWSP break points
+                elif prefer_break_at_pipe and cstk:
+                    last_zwsp = cstk.rfind('\u200B')
+                    if last_zwsp >= 0:
+                        # Split at the ZWSP position
+                        safe_text = cstk[:last_zwsp + 1]  # Include the ZWSP
+                        remaining_text = cstk[last_zwsp + 1:]  # Text after ZWSP
+
+
+                        # Output safe portion
+                        ops_vals.append({
+                            "type": OpType.TEXT,
+                            "font": fcur,
+                            "size": size,
+                            "x": tx,
+                            "dy": 0,
+                            "rtxt": raw_string(fcur, safe_text),
+                            "lidx": lidx
+                        })
+
+                        # Start new line with remaining text only
+                        x = x0
+                        lidx += 1
+                        tx = x0  # Wrapped text starts at beginning of new line
+                        cstk = remaining_text
+                        should_wrap = False
+
+                        # Calculate the width that the wrapped text will consume
+                        if remaining_text:
+                            wrapped_width = self._calculate_text_width(remaining_text, fcur, size)
+                            x = x0 + wrapped_width  # Update x position after wrapped text
+                            log.info(f"🔄 Wrapped text: '{remaining_text}' width={wrapped_width:.1f}pt, x={x0:.1f} -> {x:.1f}")
+
+                        # Check if current character is already first in remaining text
+                        if remaining_text and remaining_text[0] == ch:
+                            # Skip current character since it's already in remaining text
+                            adv = 0  # Don't advance for this character
+                        else:
+                            # Continue processing the current character normally
+                            pass
+                if brk and x + adv > x1 + 0.1 * size:  # 到达右边界且原文段落存在换行
                     x = x0
                     lidx += 1
                 if vy_regex:  # 插入公式
@@ -1021,29 +1055,31 @@ class TranslateConverter(PDFConverterEx):
                                 "lidx": lidx
                             })
                 else:  # 插入文字缓冲区
-                    if not thai_safe_break:  # 如果没有进行泰语安全换行，则正常添加字符
-                        if not cstk:  # 单行开头
-                            tx = x
-                            if x == x0 and ch == " ":  # 消除段落换行空格
-                                adv = 0
-                            elif ch == '\u200B':  # 零宽空格不应该被渲染，但保留在文本中
-                                adv = 0
-                                cstk += ch
-                            else:
-                                cstk += ch
-                        else:
-                            if ch == '\u200B':  # 零宽空格不占用宽度
-                                adv = 0
-                            cstk += ch
-                    # 如果进行了泰语安全换行，cstk已经包含了remaining_text，不需要再添加字符
+                    if not cstk:  # 单行开头
+                        tx = x
+                        if x == x0 and (ch == " " or ch == '\u200B'):  # 消除段落换行空格和ZWSP
+                            adv = 0
+                        cstk += ch
+                    else:
+                        cstk += ch
                 adv -= mod # 文字修饰符
                 fcur = fcur_
+                if adv != 0:  # Only log non-zero advances to reduce noise
+                    # ch might be undefined in ZWSP breaking scenarios, so use safe logging
+                    char_info = locals().get('ch', '[formula/unknown]')
+                    log.debug(f"📍 Char advance: '{char_info}' x={x:.2f}pt +{adv:.2f}pt = {x + adv:.2f}pt")
                 x += adv
                 if log.isEnabledFor(logging.DEBUG):
                     lstk.append(LTLine(0.1, (_x, _y), (x, y)))
                     _x, _y = x, y
             # 处理结尾
             if cstk:
+                # Log total width for Thai text segments
+                if any(0x0E00 <= ord(c) <= 0x0E7F for c in cstk):
+                    total_thai_width = self._calculate_text_width(cstk, fcur, size)
+                    base_chars = len([c for c in cstk if unicodedata.category(c) not in ['Mn', 'Mc', 'Me']])
+                    log.info(f"📊 Thai text summary: '{cstk}' width={total_thai_width:.1f}pt, base_chars={base_chars}, expected={base_chars * size * 0.6:.1f}pt")
+
                 ops_vals.append({
                     "type": OpType.TEXT,
                     "font": fcur,
