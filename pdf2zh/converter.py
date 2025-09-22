@@ -4,7 +4,7 @@ import re
 import unicodedata
 from enum import Enum
 from string import Template
-from typing import Dict
+from typing import Dict, List
 
 import numpy as np
 from pdfminer.converter import PDFConverter
@@ -16,6 +16,7 @@ from pymupdf import Font
 from tenacity import retry, wait_fixed
 
 from pdf2zh.config import ConfigManager
+from pdf2zh.text_shaper import get_text_shaper
 from pdf2zh.translator import (
     AnythingLLMTranslator,
     ArgosTranslator,
@@ -90,7 +91,7 @@ class PDFConverterEx(PDFConverter):
         ncs,
         graphicstate: PDFGraphicState,
     ) -> float:
-        # 重载设置 cid 和 font
+        # 重载设置 cid 和 fon
         try:
             text = font.to_unichr(cid)
             assert isinstance(text, str), str(type(text))
@@ -153,6 +154,7 @@ class TranslateConverter(PDFConverterEx):
         self.layout = layout
         self.noto_name = noto_name
         self.noto = noto
+        self.text_shaper = get_text_shaper()
         self.translator: BaseTranslator = None
         # e.g. "ollama:gemma2:9b" -> ["ollama", "gemma2:9b"]
         param = service.split(":", 1)
@@ -166,6 +168,109 @@ class TranslateConverter(PDFConverterEx):
                 self.translator = translator(lang_in, lang_out, service_model, envs=envs, prompt=prompt, ignore_cache=ignore_cache)
         if not self.translator:
             raise ValueError("Unsupported translation service")
+
+    def _get_font_path(self, font_name: str) -> str:
+        """Get font file path for text shaping."""
+        if font_name == self.noto_name:
+            # Use the Noto font path from config
+            noto_path = ConfigManager.get("NOTO_FONT_PATH")
+            if noto_path:
+                return noto_path
+
+        # For other fonts, we would need to map them to actual font files
+        # For now, fallback to the Noto fon
+        noto_path = ConfigManager.get("NOTO_FONT_PATH")
+        return noto_path if noto_path else ""
+
+    def _shape_text_run(self, text: str, font_name: str, font_size: float, scaled_font_size: float) -> List[Dict]:
+        """
+        Shape a text run and return detailed glyph positioning information.
+
+        Args:
+            text: Text to shape
+            font_name: Font identifier
+            font_size: Original font size
+            scaled_font_size: Scaled font size for rendering
+
+        Returns:
+            List of glyph dictionaries with positioning information
+        """
+        # Try HarfBuzz shaping first for complex scripts
+        font_path = self._get_font_path(font_name)
+
+        # Check if text needs complex shaping
+        needs_shaping = self.text_shaper._needs_shaping(text) if self.text_shaper.enabled else False
+
+        if font_path and self.text_shaper.enabled and len(text) > 0:
+            log.debug(f"🔍 Checking text '{text}' (font: {font_name}, needs_shaping: {needs_shaping})")
+
+            shaped_text = self.text_shaper.shape_text(text, font_path, scaled_font_size)
+            if shaped_text and shaped_text.success:
+                # Convert HarfBuzz glyphs to our format
+                glyphs = []
+                for glyph in shaped_text.glyphs:
+                    glyphs.append({
+                        'glyph_id': glyph.glyph_id,
+                        'cluster': glyph.cluster,
+                        'x_advance': glyph.x_advance,
+                        'y_advance': glyph.y_advance,
+                        'x_offset': glyph.x_offset,
+                        'y_offset': glyph.y_offset,
+                        'char_index': glyph.cluster if glyph.cluster < len(text) else 0
+                    })
+                log.info(f"🇹🇭 THAI SHAPING SUCCESS: '{text}' -> {len(glyphs)} glyphs (advance: {shaped_text.total_advance:.2f}pt)")
+
+                # Log detailed glyph information for Thai text
+                if any(0x0E00 <= ord(ch) <= 0x0E7F for ch in text):  # Contains Thai characters
+                    log.info(f"🔤 Thai glyph details:")
+                    for i, glyph in enumerate(glyphs[:6]):  # Show first 6 glyphs
+                        log.info(f"   [{i}] ID:{glyph['glyph_id']}, cluster:{glyph['cluster']}, "
+                                f"advance:{glyph['x_advance']:.1f}, offset:({glyph['x_offset']:.1f},{glyph['y_offset']:.1f})")
+                    if len(glyphs) > 6:
+                        log.info(f"   ... and {len(glyphs)-6} more glyphs")
+
+                return glyphs
+            else:
+                log.debug(f"❌ HarfBuzz shaping failed for '{text}' - falling back to simple processing")
+        else:
+            # Log why HarfBuzz wasn't used
+            reasons = []
+            if not font_path:
+                reasons.append("no font path")
+            if not self.text_shaper.enabled:
+                reasons.append("text shaper disabled")
+            if len(text) == 0:
+                reasons.append("empty text")
+
+            log.debug(f"⚠️ Skipping HarfBuzz for '{text}' ({', '.join(reasons)}) - using fallback")
+
+        # Fallback: create simple glyph list for character-by-character processing
+        glyphs = []
+        for i, ch in enumerate(text):
+            if font_name == self.noto_name and self.noto:
+                advance = self.noto.char_lengths(ch, scaled_font_size)[0]
+            elif hasattr(self, 'fontmap') and font_name in self.fontmap:
+                advance = self.fontmap[font_name].char_width(ord(ch)) * scaled_font_size
+            else:
+                # Default advance when no font info available
+                advance = scaled_font_size * 0.6  # Rough estimate
+
+            glyphs.append({
+                'glyph_id': ord(ch),
+                'cluster': i,
+                'x_advance': advance,
+                'y_advance': 0.0,
+                'x_offset': 0.0,
+                'y_offset': 0.0,
+                'char_index': i
+            })
+
+        # Log fallback info more prominently for Thai text
+        if any(0x0E00 <= ord(ch) <= 0x0E7F for ch in text):  # Contains Thai characters
+            log.warning(f"⚠️ THAI FALLBACK: '{text}' using simple processing instead of HarfBuzz (needs_shaping: {needs_shaping})")
+        else:
+            log.debug(f"📏 Fallback processing for '{text}': {len(glyphs)} glyphs (needs_shaping: {needs_shaping})")
+        return glyphs
 
     def receive_layout(self, ltpage: LTPage):
         # 段落
@@ -367,7 +472,36 @@ class TranslateConverter(PDFConverterEx):
         # C. 新文档排版
         def raw_string(fcur: str, cstk: str):  # 编码字符串
             if fcur == self.noto_name:
+                # Apply HarfBuzz shaping for Thai text to get proper glyph IDs
+                if (self.text_shaper.enabled and
+                    cstk and any(0x0E00 <= ord(ch) <= 0x0E7F for ch in cstk)):
+
+                    try:
+                        log.info(f"🇹🇭 GLYPH SHAPING: '{cstk}' with HarfBuzz")
+
+                        # Get font path and shape text
+                        font_path = self._get_font_path(fcur)
+                        if font_path:
+                            # Use a reasonable font size for shaping (doesn't affect glyph IDs)
+                            shaped = self.text_shaper.shape_text(cstk, font_path, 12.0)
+
+                            if shaped and shaped.success:
+                                # Use HarfBuzz glyph IDs instead of default glyph lookup
+                                glyph_codes = []
+                                for glyph in shaped.glyphs:
+                                    glyph_codes.append("%04x" % glyph.glyph_id)
+
+                                log.info(f"✅ HarfBuzz glyphs: {len(glyph_codes)} glyphs")
+                                return "".join(glyph_codes)
+                            else:
+                                log.debug(f"❌ HarfBuzz shaping failed, using fallback")
+
+                    except Exception as e:
+                        log.warning(f"⚠️ Error in glyph shaping: {e}")
+
+                # Fallback to original glyph lookup
                 return "".join(["%04x" % self.noto.has_glyph(ord(c)) for c in cstk])
+
             elif isinstance(self.fontmap[fcur], PDFCIDFont):  # 判断编码长度
                 return "".join(["%04x" % ord(c) for c in cstk])
             else:
@@ -379,16 +513,16 @@ class TranslateConverter(PDFConverterEx):
             "ja": 1.1, "ko": 1.2, "en": 1.2, "ar": 1.0, "ru": 0.8, "uk": 0.8, "ta": 0.8,
             "th": 1.5  # Increased line spacing for Thai
         }
-        
+
         # Check for custom line height from environment/config
         target_lang = self.translator.lang_out.lower()
         env_line_height_key = f"LANG_LINEHEIGHT_{target_lang.upper().replace('-', '_')}"
         custom_line_height = ConfigManager.get(env_line_height_key)
-        
+
         log.info(f"🔍 DEBUG: Checking line height for language '{target_lang}'")
         log.info(f"🔍 DEBUG: Looking for config key: {env_line_height_key}")
         log.info(f"🔍 DEBUG: Config value found: {custom_line_height}")
-        
+
         if custom_line_height:
             try:
                 default_line_height = float(custom_line_height)
@@ -399,20 +533,20 @@ class TranslateConverter(PDFConverterEx):
         else:
             default_line_height = LANG_LINEHEIGHT_MAP.get(target_lang, 1.1) # 小语种默认1.1
             log.info(f"📝 DEBUG: No custom line height, using default: {default_line_height}")
-        
+
         # 根据目标语言获取字体大小缩放比例
         LANG_FONTSIZE_SCALE = {
             "th": 0.7,  # Reduce Thai font size to 90%
         }
-        
-        # Check for custom font size scale from environment/config  
+
+        # Check for custom font size scale from environment/config
         env_fontsize_key = f"LANG_FONTSIZE_SCALE_{target_lang.upper().replace('-', '_')}"
         custom_font_scale = ConfigManager.get(env_fontsize_key)
-        
+
         log.info(f"🔍 DEBUG: Checking font scale for language '{target_lang}'")
         log.info(f"🔍 DEBUG: Looking for config key: {env_fontsize_key}")
         log.info(f"🔍 DEBUG: Config value found: {custom_font_scale}")
-        
+
         if custom_font_scale:
             try:
                 font_size_scale = float(custom_font_scale)
@@ -423,9 +557,9 @@ class TranslateConverter(PDFConverterEx):
         else:
             font_size_scale = LANG_FONTSIZE_SCALE.get(target_lang, 1.0)
             log.info(f"📝 DEBUG: No custom font scale, using default: {font_size_scale}")
-        
+
         log.info(f"🎨 DEBUG: Final settings - Font Scale: {font_size_scale}, Line Height: {default_line_height}")
-        
+
         _x, _y = 0, 0
         ops_list = []
 
@@ -433,6 +567,7 @@ class TranslateConverter(PDFConverterEx):
             scaled_size = size * font_size_scale
             if font_size_scale != 1.0:
                 log.debug(f"📏 DEBUG: Scaling font from {size:.2f} to {scaled_size:.2f} (scale: {font_size_scale})")
+
             return f"/{font} {scaled_size:f} Tf 1 0 0 1 {x:f} {y:f} Tm [<{rtxt}>] TJ "
 
         def gen_op_line(x, y, xlen, ylen, linewidth):
@@ -470,33 +605,148 @@ class TranslateConverter(PDFConverterEx):
                         continue  # 翻译器可能会自动补个越界的公式标记
                     if var[vid][-1].get_text() and unicodedata.category(var[vid][-1].get_text()[0]) in ["Lm", "Mn", "Sk"]:  # 文字修饰符
                         mod = var[vid][-1].width
-                else:  # 加载文字
+                else:  # 加载文字 - Process text with complex script support
                     ch = new[ptr]
                     fcur_ = None
                     try:
-                        if fcur_ is None and self.fontmap["tiro"].to_unichr(ord(ch)) == ch:
+                        if self.fontmap["tiro"].to_unichr(ord(ch)) == ch:
                             fcur_ = "tiro"  # 默认拉丁字体
                     except Exception:
                         pass
                     if fcur_ is None:
                         fcur_ = self.noto_name  # 默认非拉丁字体
+
                     # Calculate advancement using scaled font size for proper line width calculation
                     scaled_size_for_width = size * font_size_scale
-                    if fcur_ == self.noto_name: # FIXME: change to CONST
+
+                    # Try complex text processing for Thai and other complex scripts (temporarily disabled - causes layout issues)
+                    if False and fcur_ == self.noto_name and self.text_shaper.enabled and ptr < len(new):
+                        # Collect the LONGEST possible text run for optimal shaping
+                        text_run = ch
+                        lookahead_ptr = ptr + 1
+
+                        # Aggressively collect characters - shape entire sentences when possible
+                        # Only stop for: formula markers, font changes, or end of text
+                        while lookahead_ptr < len(new):
+                            # Check for formula marker
+                            if re.match(r"\{\s*v([\d\s]+)\}", new[lookahead_ptr:], re.IGNORECASE):
+                                break
+
+                            next_ch = new[lookahead_ptr]
+                            next_fcur = None
+                            try:
+                                if self.fontmap["tiro"].to_unichr(ord(next_ch)) == next_ch:
+                                    next_fcur = "tiro"
+                            except Exception:
+                                pass
+                            if next_fcur is None:
+                                next_fcur = self.noto_name
+
+                            # Stop if font changes
+                            if next_fcur != fcur_:
+                                break
+
+                            text_run += next_ch
+                            lookahead_ptr += 1
+
+                        # Check if this text run contains complex scripts that need shaping
+                        if self.text_shaper._needs_shaping(text_run):
+                            # Process the entire run with HarfBuzz - this enables proper contextual shaping
+                            glyphs = self._shape_text_run(text_run, fcur_, size, scaled_size_for_width)
+
+                            log.debug(f"🔤 Processing complex script sentence: '{text_run}' ({len(text_run)} chars) -> {len(glyphs)} glyphs")
+
+                            # Generate text operations using cluster-based rendering
+                            # Group glyphs by cluster to render complete character units
+                            clusters = {}
+                            total_advance = 0.0
+
+                            # Group glyphs by cluster
+                            for glyph in glyphs:
+                                cluster = glyph['cluster']
+                                if cluster not in clusters:
+                                    clusters[cluster] = {
+                                        'chars': '',
+                                        'base_advance': 0.0,
+                                        'x_offset': 0.0,
+                                        'y_offset': 0.0,
+                                        'char_indices': []
+                                    }
+
+                                char_idx = glyph['char_index']
+                                if char_idx < len(text_run):
+                                    char = text_run[char_idx]
+
+                                    # Build complete character string for this cluster
+                                    if char_idx not in clusters[cluster]['char_indices']:
+                                        clusters[cluster]['chars'] += char
+                                        clusters[cluster]['char_indices'].append(char_idx)
+
+                                    # Track the main advance (from base characters)
+                                    char_category = unicodedata.category(char)
+                                    if char_category not in ['Mn', 'Mc', 'Me']:  # Not a combining mark
+                                        clusters[cluster]['base_advance'] += glyph['x_advance']
+
+                                    # Use positioning from the first glyph in cluster for offset
+                                    if len(clusters[cluster]['char_indices']) == 1:
+                                        clusters[cluster]['x_offset'] = glyph['x_offset']
+                                        clusters[cluster]['y_offset'] = glyph['y_offset']
+
+                            # Generate one text operation per cluster
+                            current_x = x
+                            for cluster_id in sorted(clusters.keys()):
+                                cluster_data = clusters[cluster_id]
+
+                                if cluster_data['chars']:
+                                    # Position the complete cluster
+                                    cluster_x = current_x + cluster_data['x_offset']
+                                    cluster_y = cluster_data['y_offset']
+
+                                    # Create single text operation for the complete character cluster
+                                    ops_vals.append({
+                                        "type": OpType.TEXT,
+                                        "font": fcur_,
+                                        "size": size,
+                                        "x": cluster_x,
+                                        "dy": cluster_y,
+                                        "rtxt": raw_string(fcur_, cluster_data['chars']),
+                                        "lidx": lidx
+                                    })
+
+                                    log.debug(f"🔤 Cluster {cluster_id}: '{cluster_data['chars']}' at x={cluster_x:.2f}, y_offset={cluster_y:.2f}, advance={cluster_data['base_advance']:.2f}")
+
+                                    # Advance to next cluster position
+                                    current_x += cluster_data['base_advance']
+                                    total_advance += cluster_data['base_advance']
+
+                            # Update main x position and pointer
+                            x = current_x
+                            ptr = lookahead_ptr  # Skip past the processed run
+                            adv = 0  # No additional advancement needed
+                            fcur = fcur_
+
+                            # Clear text buffer since we processed the run directly
+                            cstk = ""
+                            continue
+
+                    # Standard character processing (fallback or non-complex scripts)
+                    if fcur_ == self.noto_name:
                         adv = self.noto.char_lengths(ch, scaled_size_for_width)[0]
-                        if font_size_scale != 1.0:
-                            original_adv = self.noto.char_lengths(ch, size)[0]
-                            log.debug(f"📐 DEBUG: Char '{ch}' width scaled from {original_adv:.2f} to {adv:.2f}")
                     else:
                         adv = self.fontmap[fcur_].char_width(ord(ch)) * scaled_size_for_width
-                        if font_size_scale != 1.0:
+
+                    if font_size_scale != 1.0:
+                        if fcur_ == self.noto_name:
+                            original_adv = self.noto.char_lengths(ch, size)[0]
+                        else:
                             original_adv = self.fontmap[fcur_].char_width(ord(ch)) * size
-                            log.debug(f"📐 DEBUG: Char '{ch}' width scaled from {original_adv:.2f} to {adv:.2f}")
+                        log.debug(f"📐 DEBUG: Char '{ch}' width scaled from {original_adv:.2f} to {adv:.2f}")
+
                     ptr += 1
                 if (                                # 输出文字缓冲区
                     fcur_ != fcur                   # 1. 字体更新
                     or vy_regex                     # 2. 插入公式
-                    or x + adv > x1 + 0.1 * scaled_size_for_width    # 3. 到达右边界（可能一整行都被符号化，这里需要考虑浮点误差）
+                    or (adv > 0 and x + adv > x1 + 0.1 * scaled_size_for_width)    # 3. 到达右边界（可能一整行都被符号化，这里需要考虑浮点误差）
                 ):
                     if cstk:
                         ops_vals.append({
@@ -573,7 +823,7 @@ class TranslateConverter(PDFConverterEx):
 
             while (lidx + 1) * size * line_height > height and line_height >= 1:
                 line_height -= 0.05
-            
+
             if line_height != original_line_height:
                 log.debug(f"📐 DEBUG: Line height auto-adjusted from {original_line_height:.2f} to {line_height:.2f} to fit content")
             else:

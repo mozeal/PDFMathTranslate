@@ -56,6 +56,7 @@ bumpver update --patch  # or --minor, --major
 7. **pdf2zh/gui.py** - Gradio-based web interface
 8. **pdf2zh/backend.py** - Flask backend for API operations
 9. **pdf2zh/mcp_server.py** - MCP (Model Context Protocol) server implementation
+10. **pdf2zh/text_shaper.py** - HarfBuzz-based text shaping for complex scripts
 
 ### Translation Pipeline
 
@@ -63,7 +64,8 @@ bumpver update --patch  # or --minor, --major
 2. **Layout Analysis** - DocLayout-YOLO ONNX model for structure detection
 3. **Text Extraction** - Preserves mathematical formulas and formatting
 4. **Translation** - Supports 15+ translation services with caching
-5. **Document Reconstruction** - Generates bilingual and mono-lingual outputs
+5. **Text Shaping** - HarfBuzz integration for complex script rendering (Thai, Arabic, Indic)
+6. **Document Reconstruction** - Generates bilingual and mono-lingual outputs with proper text layout
 
 ### Translation Services Supported
 
@@ -87,6 +89,7 @@ bumpver update --patch  # or --minor, --major
 - **babeldoc>=0.1.22, <0.3.0** - Alternative backend
 - **onnx/onnxruntime** - Layout detection models
 - **tenacity** - Retry logic for API calls
+- **uharfbuzz>=0.51.0** - HarfBuzz text shaping for complex scripts (Thai, Arabic, Indic)
 
 ## Configuration
 
@@ -95,13 +98,27 @@ bumpver update --patch  # or --minor, --major
 - **.pre-commit-config.yaml** - Code quality hooks
 - Environment variables for HuggingFace endpoints and API keys
 
+### Text Shaping Configuration
+
+Text shaping for complex scripts (Thai, Arabic, Indic) can be configured via:
+
+- **TEXT_SHAPING_ENABLED** - Enable/disable HarfBuzz text shaping (default: true)
+- **NOTO_FONT_PATH** - Path to font file for text shaping (required for complex scripts)
+
+Example configuration:
+```bash
+export TEXT_SHAPING_ENABLED=true
+export NOTO_FONT_PATH=/path/to/NotoSansThai-Regular.ttf
+```
+
 ## Testing
 
 Tests are located in `test/` directory:
 - `test_translator.py` - Translation service tests
-- `test_converter.py` - PDF conversion tests  
+- `test_converter.py` - PDF conversion tests
 - `test_doclayout.py` - Layout detection tests
 - `test_cache.py` - Caching functionality tests
+- `test_text_shaper.py` - Text shaping functionality tests
 
 ## Important Notes
 

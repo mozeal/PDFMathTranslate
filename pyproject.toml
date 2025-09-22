@@ -34,6 +34,7 @@ dependencies = [
     "pikepdf",
     "peewee>=3.17.8",
     "fontTools",
+    "uharfbuzz>=0.51.0",
     "babeldoc>=0.1.22, <0.3.0",
     "rich",
 ]
