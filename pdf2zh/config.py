@@ -167,7 +167,12 @@ class ConfigManager:
 
     @classmethod
     def get_env_by_translatername(cls, translater_name, name, default=None):
-        """根据 name 获取对应的 translator 配置"""
+        """根据 name 获取对应的 translator 配置 - SECURITY: prioritize environment variables"""
+        # SECURITY FIX: First check environment variables (including .env files)
+        if name in os.environ:
+            return os.environ[name]
+
+        # Fallback to config.json only if no environment variable is set
         instance = cls.get_instance()
         translators = instance._config_data.get("translators", [])
         for translator in translators:
