@@ -41,9 +41,11 @@ services:
 
     command: ["pdf2zh", "-i"]
 
-    # Optional: Mount a volume for persistent data I/O if needed
-    # volumes:
-    #   - ./data:/app/data
+    # Mount volumes for persistent data, config access, and custom fonts
+    volumes:
+      - ./data:/app/data
+      - ./config:/root/.config/PDFMathTranslate
+      - ./fonts:/app/fonts
 
     stdin_open: true
     tty: true

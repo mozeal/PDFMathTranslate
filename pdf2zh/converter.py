@@ -15,6 +15,7 @@ from pdfminer.utils import apply_matrix_pt, mult_matrix
 from pymupdf import Font
 from tenacity import retry, wait_fixed
 
+from pdf2zh.config import ConfigManager
 from pdf2zh.translator import (
     AnythingLLMTranslator,
     ArgosTranslator,
@@ -375,14 +376,64 @@ class TranslateConverter(PDFConverterEx):
         # 根据目标语言获取默认行距
         LANG_LINEHEIGHT_MAP = {
             "zh-cn": 1.4, "zh-tw": 1.4, "zh-hans": 1.4, "zh-hant": 1.4, "zh": 1.4,
-            "ja": 1.1, "ko": 1.2, "en": 1.2, "ar": 1.0, "ru": 0.8, "uk": 0.8, "ta": 0.8
+            "ja": 1.1, "ko": 1.2, "en": 1.2, "ar": 1.0, "ru": 0.8, "uk": 0.8, "ta": 0.8,
+            "th": 1.5  # Increased line spacing for Thai
         }
-        default_line_height = LANG_LINEHEIGHT_MAP.get(self.translator.lang_out.lower(), 1.1) # 小语种默认1.1
+        
+        # Check for custom line height from environment/config
+        target_lang = self.translator.lang_out.lower()
+        env_line_height_key = f"LANG_LINEHEIGHT_{target_lang.upper().replace('-', '_')}"
+        custom_line_height = ConfigManager.get(env_line_height_key)
+        
+        log.info(f"🔍 DEBUG: Checking line height for language '{target_lang}'")
+        log.info(f"🔍 DEBUG: Looking for config key: {env_line_height_key}")
+        log.info(f"🔍 DEBUG: Config value found: {custom_line_height}")
+        
+        if custom_line_height:
+            try:
+                default_line_height = float(custom_line_height)
+                log.info(f"✅ DEBUG: Using custom line height: {default_line_height}")
+            except (ValueError, TypeError):
+                default_line_height = LANG_LINEHEIGHT_MAP.get(target_lang, 1.1)
+                log.warning(f"⚠️  DEBUG: Invalid line height value, using default: {default_line_height}")
+        else:
+            default_line_height = LANG_LINEHEIGHT_MAP.get(target_lang, 1.1) # 小语种默认1.1
+            log.info(f"📝 DEBUG: No custom line height, using default: {default_line_height}")
+        
+        # 根据目标语言获取字体大小缩放比例
+        LANG_FONTSIZE_SCALE = {
+            "th": 0.7,  # Reduce Thai font size to 90%
+        }
+        
+        # Check for custom font size scale from environment/config  
+        env_fontsize_key = f"LANG_FONTSIZE_SCALE_{target_lang.upper().replace('-', '_')}"
+        custom_font_scale = ConfigManager.get(env_fontsize_key)
+        
+        log.info(f"🔍 DEBUG: Checking font scale for language '{target_lang}'")
+        log.info(f"🔍 DEBUG: Looking for config key: {env_fontsize_key}")
+        log.info(f"🔍 DEBUG: Config value found: {custom_font_scale}")
+        
+        if custom_font_scale:
+            try:
+                font_size_scale = float(custom_font_scale)
+                log.info(f"✅ DEBUG: Using custom font scale: {font_size_scale}")
+            except (ValueError, TypeError):
+                font_size_scale = LANG_FONTSIZE_SCALE.get(target_lang, 1.0)
+                log.warning(f"⚠️  DEBUG: Invalid font scale value, using default: {font_size_scale}")
+        else:
+            font_size_scale = LANG_FONTSIZE_SCALE.get(target_lang, 1.0)
+            log.info(f"📝 DEBUG: No custom font scale, using default: {font_size_scale}")
+        
+        log.info(f"🎨 DEBUG: Final settings - Font Scale: {font_size_scale}, Line Height: {default_line_height}")
+        
         _x, _y = 0, 0
         ops_list = []
 
         def gen_op_txt(font, size, x, y, rtxt):
-            return f"/{font} {size:f} Tf 1 0 0 1 {x:f} {y:f} Tm [<{rtxt}>] TJ "
+            scaled_size = size * font_size_scale
+            if font_size_scale != 1.0:
+                log.debug(f"📏 DEBUG: Scaling font from {size:.2f} to {scaled_size:.2f} (scale: {font_size_scale})")
+            return f"/{font} {scaled_size:f} Tf 1 0 0 1 {x:f} {y:f} Tm [<{rtxt}>] TJ "
 
         def gen_op_line(x, y, xlen, ylen, linewidth):
             return f"ET q 1 0 0 1 {x:f} {y:f} cm [] 0 d 0 J {linewidth:f} w 0 0 m {xlen:f} {ylen:f} l S Q BT "
@@ -429,15 +480,23 @@ class TranslateConverter(PDFConverterEx):
                         pass
                     if fcur_ is None:
                         fcur_ = self.noto_name  # 默认非拉丁字体
+                    # Calculate advancement using scaled font size for proper line width calculation
+                    scaled_size_for_width = size * font_size_scale
                     if fcur_ == self.noto_name: # FIXME: change to CONST
-                        adv = self.noto.char_lengths(ch, size)[0]
+                        adv = self.noto.char_lengths(ch, scaled_size_for_width)[0]
+                        if font_size_scale != 1.0:
+                            original_adv = self.noto.char_lengths(ch, size)[0]
+                            log.debug(f"📐 DEBUG: Char '{ch}' width scaled from {original_adv:.2f} to {adv:.2f}")
                     else:
-                        adv = self.fontmap[fcur_].char_width(ord(ch)) * size
+                        adv = self.fontmap[fcur_].char_width(ord(ch)) * scaled_size_for_width
+                        if font_size_scale != 1.0:
+                            original_adv = self.fontmap[fcur_].char_width(ord(ch)) * size
+                            log.debug(f"📐 DEBUG: Char '{ch}' width scaled from {original_adv:.2f} to {adv:.2f}")
                     ptr += 1
                 if (                                # 输出文字缓冲区
                     fcur_ != fcur                   # 1. 字体更新
                     or vy_regex                     # 2. 插入公式
-                    or x + adv > x1 + 0.1 * size    # 3. 到达右边界（可能一整行都被符号化，这里需要考虑浮点误差）
+                    or x + adv > x1 + 0.1 * scaled_size_for_width    # 3. 到达右边界（可能一整行都被符号化，这里需要考虑浮点误差）
                 ):
                     if cstk:
                         ops_vals.append({
@@ -510,9 +569,15 @@ class TranslateConverter(PDFConverterEx):
                 })
 
             line_height = default_line_height
+            original_line_height = line_height
 
             while (lidx + 1) * size * line_height > height and line_height >= 1:
                 line_height -= 0.05
+            
+            if line_height != original_line_height:
+                log.debug(f"📐 DEBUG: Line height auto-adjusted from {original_line_height:.2f} to {line_height:.2f} to fit content")
+            else:
+                log.debug(f"📐 DEBUG: Using line height: {line_height:.2f}")
 
             for vals in ops_vals:
                 if vals["type"] == OpType.TEXT:

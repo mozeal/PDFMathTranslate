@@ -1,0 +1,22 @@
+{
+    "PDF2ZH_LANG_FROM": "English",
+    "PDF2ZH_LANG_TO": "Thai",
+    "PDF2ZH_VFONT": "",
+    "translators": [
+        {
+            "name": "openai",
+            "envs": {
+                "OPENAI_BASE_URL": "https://api.openai.com/v1",
+                "OPENAI_API_KEY": "your-openai-api-key-here",
+                "OPENAI_MODEL": "gpt-4.1"
+            }
+        }
+    ],
+    "NOTO_FONT_PATH": "/app/fonts/Sarabun-Regular.ttf",
+    "LANG_FONTSIZE_SCALE_TH": "0.8",
+    "LANG_LINEHEIGHT_TH": "1.8",
+    "LANG_FONTSIZE_SCALE_EN": "1.0",
+    "LANG_LINEHEIGHT_EN": "1.1",
+    "LANG_FONTSIZE_SCALE_ZH": "1.0",
+    "LANG_LINEHEIGHT_ZH": "1.4"
+}

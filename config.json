@@ -1,0 +1,23 @@
+{
+  "translators": {
+    "openai": {
+      "OPENAI_API_KEY": "your-openai-api-key-here",
+      "OPENAI_BASE_URL": "https://api.openai.com/v1",
+      "OPENAI_MODEL": "gpt-4o-mini"
+    },
+    "deepl": {
+      "DEEPL_AUTH_KEY": "your-deepl-auth-key-here"
+    },
+    "azure": {
+      "AZURE_API_KEY": "your-azure-key-here",
+      "AZURE_REGION": "your-azure-region"
+    },
+    "gemini": {
+      "GEMINI_API_KEY": "your-gemini-api-key-here"
+    }
+  },
+  "cache_enabled": true,
+  "default_translator": "google",
+  "default_source_language": "en",
+  "default_target_language": "zh"
+}
